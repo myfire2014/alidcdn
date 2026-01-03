@@ -116,7 +116,106 @@ export function DomainsListPage({ domains }: DomainsListProps) {
               alert('导入失败: ' + e.message);
             }
           }
+
+          // Certificate update with SSE
+          let certUpdateEventSource = null;
+          
+          function startCertUpdate(domainId, domainName) {
+            const modal = document.getElementById('cert-update-modal');
+            const title = document.getElementById('cert-update-title');
+            const logs = document.getElementById('cert-update-logs');
+            const progress = document.getElementById('cert-update-progress');
+            const closeBtn = document.getElementById('cert-update-close');
+            
+            title.textContent = '更新证书: ' + domainName;
+            logs.innerHTML = '';
+            progress.style.width = '0%';
+            closeBtn.disabled = true;
+            modal.classList.remove('hidden');
+            
+            addLog('info', '连接服务器...');
+            
+            certUpdateEventSource = new EventSource('/api/domains/' + domainId + '/update-cert/stream');
+            
+            certUpdateEventSource.addEventListener('start', (e) => {
+              const data = JSON.parse(e.data);
+              addLog('info', data.message);
+            });
+            
+            certUpdateEventSource.addEventListener('progress', (e) => {
+              const data = JSON.parse(e.data);
+              addLog('step', '[' + data.step + '] ' + data.message);
+              progress.style.width = data.progress + '%';
+            });
+            
+            certUpdateEventSource.addEventListener('complete', (e) => {
+              const data = JSON.parse(e.data);
+              addLog('success', '✓ ' + data.message);
+              progress.style.width = '100%';
+            });
+            
+            certUpdateEventSource.addEventListener('error', (e) => {
+              if (e.data) {
+                const data = JSON.parse(e.data);
+                addLog('error', '✗ ' + data.message);
+              }
+            });
+            
+            certUpdateEventSource.addEventListener('end', (e) => {
+              closeBtn.disabled = false;
+              certUpdateEventSource.close();
+              certUpdateEventSource = null;
+              // Refresh domain list
+              htmx.trigger('#domains-table', 'sse:domain_updated');
+            });
+            
+            certUpdateEventSource.onerror = () => {
+              addLog('error', '连接断开');
+              closeBtn.disabled = false;
+              if (certUpdateEventSource) {
+                certUpdateEventSource.close();
+                certUpdateEventSource = null;
+              }
+            };
+          }
+          
+          function addLog(type, message) {
+            const logs = document.getElementById('cert-update-logs');
+            const colors = { info: 'text-gray-600', step: 'text-blue-600', success: 'text-green-600', error: 'text-red-600' };
+            const time = new Date().toLocaleTimeString('zh-CN');
+            logs.innerHTML += '<div class="' + (colors[type] || 'text-gray-600') + '"><span class="text-gray-400 text-xs">' + time + '</span> ' + message + '</div>';
+            logs.scrollTop = logs.scrollHeight;
+          }
+          
+          function closeCertUpdateModal() {
+            document.getElementById('cert-update-modal').classList.add('hidden');
+            if (certUpdateEventSource) {
+              certUpdateEventSource.close();
+              certUpdateEventSource = null;
+            }
+          }
         `}</script>
+
+        {/* Certificate Update Modal */}
+        <div id="cert-update-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div class="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4">
+            <div class="px-6 py-4 border-b flex justify-between items-center">
+              <h3 id="cert-update-title" class="text-lg font-semibold">更新证书</h3>
+              <button onclick="closeCertUpdateModal()" class="text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+            <div class="p-6">
+              <div class="mb-4">
+                <div class="h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div id="cert-update-progress" class="h-full bg-indigo-600 transition-all duration-300" style="width: 0%"></div>
+                </div>
+              </div>
+              <div id="cert-update-logs" class="h-64 overflow-y-auto bg-gray-50 rounded p-3 font-mono text-sm space-y-1"></div>
+            </div>
+            <div class="px-6 py-4 border-t flex justify-end">
+              <Button id="cert-update-close" onclick="closeCertUpdateModal()" disabled>关闭</Button>
+            </div>
+          </div>
+        </div>
 
         {/* SSE Connection */}
         <div sse-connect="/events" sse-swap="message" style="display:none"></div>
@@ -238,8 +337,7 @@ function DomainRow({ domain }: { domain: Domain }) {
             <span>检测</span>
           </button>
           <button
-            hx-post={`/api/domains/${domain.id}/update-cert`}
-            hx-swap="none"
+            onclick={`startCertUpdate(${domain.id}, '${domain.domain}')`}
             class="text-green-600 hover:text-green-700 text-sm"
           >
             更新

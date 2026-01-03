@@ -120,16 +120,87 @@ export const domainsApi = new Elysia({ prefix: '/api/domains' })
       const id = parseInt(params.id);
       const domain = domainService.get(id);
       if (!domain) { set.status = 404; return { error: 'Not found' }; }
-      const result = await certUpdater.updateCertificate(id);
-      if (!result.success) {
-        set.status = 500;
-        return { error: result.message };
-      }
-      return { success: true, message: result.message, certificateId: result.certificateId };
+      // 返回提示使用 SSE 接口
+      return { 
+        success: true, 
+        message: 'Use SSE endpoint /api/domains/:id/update-cert/stream for real-time progress',
+        streamUrl: `/api/domains/${id}/update-cert/stream`
+      };
     } catch (error) {
       set.status = 500;
       return { error: error instanceof Error ? error.message : 'Failed' };
     }
+  }, { params: t.Object({ id: t.String() }) })
+
+  .get('/:id/update-cert/stream', ({ params, request }) => {
+    const id = parseInt(params.id);
+    const domain = domainService.get(id);
+    
+    if (!domain) {
+      return new Response(JSON.stringify({ error: 'Domain not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    const encoder = new TextEncoder();
+    let isAborted = false;
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const send = (event: string, data: unknown) => {
+          if (isAborted) return;
+          try {
+            controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+          } catch {
+            // Stream closed
+          }
+        };
+
+        // Handle client disconnect
+        request.signal.addEventListener('abort', () => {
+          isAborted = true;
+          try { controller.close(); } catch {}
+        });
+
+        send('start', { domain: domain.domain, message: '开始更新证书...' });
+
+        try {
+          const result = await certUpdater.updateCertificate(id, (step, message, progress) => {
+            send('progress', { step, message, progress });
+          });
+
+          if (result.success) {
+            send('complete', { 
+              success: true, 
+              message: result.message,
+              expiresOn: result.expiresOn
+            });
+          } else {
+            send('error', { success: false, message: result.message });
+          }
+        } catch (error) {
+          send('error', { 
+            success: false, 
+            message: error instanceof Error ? error.message : 'Unknown error' 
+          });
+        }
+
+        send('end', { finished: true });
+        
+        if (!isAborted) {
+          try { controller.close(); } catch {}
+        }
+      }
+    });
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+      }
+    });
   }, { params: t.Object({ id: t.String() }) })
 
   .post('/:id/sync-dcdn', async ({ params, set }) => {
