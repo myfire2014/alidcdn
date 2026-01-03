@@ -4,7 +4,7 @@ import { sseController } from '../controllers/sse-controller';
 import { logCertCheck } from './audit-logger';
 import { getCertInfo } from '../utils/cert-checker';
 import { getCertStatusFromInfo, DEFAULT_EXPIRY_THRESHOLD } from '../utils/cert-status';
-import type { CertCheckResult, DomainWithStatus, TaskStatus } from '../types';
+import type { CertCheckResult, Domain, TaskStatus } from '../types';
 
 export class CertMonitor {
   private expiryThreshold: number = DEFAULT_EXPIRY_THRESHOLD;
@@ -24,35 +24,40 @@ export class CertMonitor {
   }
 
   /**
-   * Check certificate for a single domain
+   * Check certificate for a single domain by domain name
    */
-  async checkDomain(domainId: number): Promise<CertCheckResult> {
-    const domainData = domainService.get(domainId);
+  async checkDomain(domainName: string): Promise<CertCheckResult> {
+    const domainData = domainService.getByDomain(domainName);
     if (!domainData) {
       throw new Error('Domain not found');
     }
 
     const result = await this.performCheck(domainData);
     
+    // Map status to new format
+    const statusMap: Record<string, 'valid' | 'expiring_soon' | 'expired' | 'unknown' | 'error'> = {
+      'valid': 'valid',
+      'expiring': 'expiring_soon',
+      'expired': 'expired',
+      'error': 'error'
+    };
+
     // Update domain certificate status
-    domainService.updateCertStatus(domainId, {
-      status: result.status,
-      issuer: result.issuer,
-      validFrom: result.validFrom?.toISOString(),
-      validTo: result.validTo?.toISOString(),
-      daysRemaining: result.daysRemaining,
-      errorMessage: result.error
+    domainService.updateCertStatus(domainData.id, {
+      status: statusMap[result.status] || 'error',
+      expiry: result.validTo?.toISOString(),
+      issuer: result.issuer
     });
 
     // Log the check
-    logCertCheck(domainId, domainData.domain, result.status === 'error' ? 'failure' : 'success', {
+    logCertCheck(domainData.id, domainData.domain, result.status === 'error' ? 'failure' : 'success', {
       status: result.status,
       daysRemaining: result.daysRemaining,
       error: result.error
     });
 
     // Broadcast update
-    sseController.broadcastDomainUpdate(domainId, domainData.domain, {
+    sseController.broadcastDomainUpdate(domainData.id, domainData.domain, {
       certStatus: result.status,
       daysRemaining: result.daysRemaining
     });
@@ -61,9 +66,20 @@ export class CertMonitor {
   }
 
   /**
+   * Check certificate by domain ID
+   */
+  async checkDomainById(domainId: number): Promise<CertCheckResult> {
+    const domainData = domainService.get(domainId);
+    if (!domainData) {
+      throw new Error('Domain not found');
+    }
+    return this.checkDomain(domainData.domain);
+  }
+
+  /**
    * Perform the actual certificate check
    */
-  private async performCheck(domainData: DomainWithStatus): Promise<CertCheckResult> {
+  private async performCheck(domainData: Domain): Promise<CertCheckResult> {
     try {
       const certInfo = await getCertInfo(domainData.domain);
       const status = getCertStatusFromInfo(certInfo, this.expiryThreshold);
@@ -123,7 +139,7 @@ export class CertMonitor {
     taskQueue.updateProgress(task.id, 10, 'Connecting to server...');
     
     try {
-      const result = await this.checkDomain(task.domainId);
+      const result = await this.checkDomainById(task.domainId);
       
       if (result.status === 'error') {
         taskQueue.completeTask(task.id, false, `Check failed: ${result.error}`, result.error);
@@ -143,11 +159,11 @@ export class CertMonitor {
   /**
    * Get domains that need renewal
    */
-  getDomainsNeedingRenewal(): DomainWithStatus[] {
+  getDomainsNeedingRenewal(): Domain[] {
     const domains = domainService.list();
     return domains.filter(d => 
-      d.cert_status?.status === 'expiring' || 
-      d.cert_status?.status === 'expired'
+      d.cert_status === 'expiring_soon' || 
+      d.cert_status === 'expired'
     );
   }
 }

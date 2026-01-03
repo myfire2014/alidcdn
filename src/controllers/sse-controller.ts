@@ -3,8 +3,14 @@ import type { SSEEvent, TaskEvent, TaskStatus } from '../types';
 
 type SSECallback = (event: SSEEvent) => void;
 
+interface ConnectionState {
+  callback: SSECallback;
+  eventQueue: Array<{ type: string; data: unknown }>;
+}
+
 class SSEController {
-  private connections: Set<SSECallback> = new Set();
+  private connections: Map<number, ConnectionState> = new Map();
+  private connectionIdCounter = 0;
   private unsubscribeTaskQueue: (() => void) | null = null;
 
   constructor() {
@@ -21,10 +27,42 @@ class SSEController {
   }
 
   /**
-   * Register a new SSE connection
+   * Add a new SSE connection (simple ID-based)
    */
-  addConnection(callback: SSECallback): () => void {
-    this.connections.add(callback);
+  addConnection(): number {
+    const id = ++this.connectionIdCounter;
+    this.connections.set(id, {
+      callback: () => {},
+      eventQueue: []
+    });
+    return id;
+  }
+
+  /**
+   * Remove a connection
+   */
+  removeConnection(id: number): void {
+    this.connections.delete(id);
+  }
+
+  /**
+   * Get events for a connection and clear the queue
+   */
+  getEvents(connectionId: number): Array<{ type: string; data: unknown }> {
+    const conn = this.connections.get(connectionId);
+    if (!conn) return [];
+    const events = [...conn.eventQueue];
+    conn.eventQueue = [];
+    return events;
+  }
+
+  /**
+   * Register a new SSE connection with callback
+   */
+  addConnectionWithCallback(callback: SSECallback): () => void {
+    const id = this.addConnection();
+    const conn = this.connections.get(id)!;
+    conn.callback = callback;
     
     // Send current active tasks to new connection
     const activeTasks = taskQueue.getActiveTasks();
@@ -36,7 +74,7 @@ class SSEController {
     }
 
     return () => {
-      this.connections.delete(callback);
+      this.removeConnection(id);
     };
   }
 
@@ -50,10 +88,18 @@ class SSEController {
   /**
    * Broadcast an event to all connections
    */
-  broadcast(event: SSEEvent): void {
-    for (const callback of this.connections) {
+  broadcast(event: SSEEvent | { type: string; data: unknown }): void {
+    for (const [, conn] of this.connections) {
       try {
-        callback(event);
+        // Add to event queue
+        conn.eventQueue.push({
+          type: 'type' in event ? event.type : event.type,
+          data: 'payload' in event ? event.payload : event.data
+        });
+        // Also call callback if set
+        if (conn.callback && 'payload' in event) {
+          conn.callback(event as SSEEvent);
+        }
       } catch (error) {
         console.error('Error broadcasting SSE event:', error);
       }
@@ -115,7 +161,7 @@ class SSEController {
       }
     };
 
-    const removeConnection = this.addConnection(callback);
+    const removeConnection = this.addConnectionWithCallback(callback);
 
     try {
       // Send initial connection event

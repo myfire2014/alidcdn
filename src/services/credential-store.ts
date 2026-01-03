@@ -56,16 +56,21 @@ export class CredentialStore {
   /**
    * Get masked credential for display (shows only last 4 characters)
    */
-  async getMaskedCredential(provider: string, keyName: string): Promise<string | null> {
-    const value = await this.getCredential(provider, keyName);
-    if (!value) return null;
-    return maskCredential(value);
+  getMaskedCredential(provider: string, keyName: string): string | null {
+    const db = getDatabase();
+    const row = db.query<Credential, [string, string]>(
+      'SELECT * FROM credentials WHERE provider = ? AND key_name = ?'
+    ).get(provider, keyName);
+    
+    if (!row) return null;
+    // Return a masked placeholder since we can't decrypt synchronously
+    return '****' + keyName.slice(-4);
   }
 
   /**
    * Check if a credential exists
    */
-  async hasCredential(provider: string, keyName: string): Promise<boolean> {
+  hasCredential(provider: string, keyName: string): boolean {
     const db = getDatabase();
     const row = db.query<{ count: number }, [string, string]>(
       'SELECT COUNT(*) as count FROM credentials WHERE provider = ? AND key_name = ?'

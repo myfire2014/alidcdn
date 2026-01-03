@@ -17,7 +17,6 @@ describe('DomainService', () => {
   beforeEach(() => {
     // Clean up domains table before each test
     const db = getDatabase();
-    db.run('DELETE FROM certificate_status');
     db.run('DELETE FROM domains');
   });
 
@@ -26,7 +25,7 @@ describe('DomainService', () => {
     
     expect(result.domain).toBe('example.com');
     expect(result.id).toBeGreaterThan(0);
-    expect(result.cert_status).toBeNull();
+    expect(result.cert_status).toBe('unknown');
   });
 
   test('should normalize domain to lowercase', () => {
@@ -69,9 +68,9 @@ describe('DomainService', () => {
 
   test('should update domain', () => {
     const created = service.create({ domain: 'update-test.com' });
-    const updated = service.update(created.id, { description: 'Updated description' });
+    const updated = service.update(created.id, { notes: 'Updated notes' });
 
-    expect(updated.description).toBe('Updated description');
+    expect(updated.notes).toBe('Updated notes');
   });
 
   test('should delete domain', () => {
@@ -92,15 +91,12 @@ describe('DomainService', () => {
     service.updateCertStatus(created.id, {
       status: 'valid',
       issuer: 'Let\'s Encrypt',
-      validFrom: '2024-01-01',
-      validTo: '2024-04-01',
-      daysRemaining: 90
+      expiry: '2024-04-01'
     });
 
     const retrieved = service.get(created.id);
-    expect(retrieved!.cert_status).not.toBeNull();
-    expect(retrieved!.cert_status!.status).toBe('valid');
-    expect(retrieved!.cert_status!.issuer).toBe('Let\'s Encrypt');
+    expect(retrieved!.cert_status).toBe('valid');
+    expect(retrieved!.cert_issuer).toBe('Let\'s Encrypt');
   });
 
   test('should get status counts', () => {
@@ -111,12 +107,12 @@ describe('DomainService', () => {
     const domains = service.list();
     service.updateCertStatus(domains[0].id, { status: 'valid' });
     service.updateCertStatus(domains[1].id, { status: 'valid' });
-    service.updateCertStatus(domains[2].id, { status: 'expiring' });
+    service.updateCertStatus(domains[2].id, { status: 'expiring_soon' });
 
     const counts = service.getStatusCounts();
     expect(counts.total).toBe(3);
     expect(counts.valid).toBe(2);
-    expect(counts.expiring).toBe(1);
+    expect(counts.expiring_soon).toBe(1);
   });
 
   test('should get domain by domain name', () => {

@@ -1,26 +1,16 @@
--- 域名表
+-- 域名表（简化版，包含证书状态）
 CREATE TABLE IF NOT EXISTS domains (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   domain TEXT NOT NULL UNIQUE,
-  description TEXT,
-  cloudflare_zone_id TEXT,
-  aliyun_dcdn_domain TEXT,
+  notes TEXT,
+  auto_renew INTEGER DEFAULT 1,
+  dcdn_enabled INTEGER DEFAULT 0,
+  cert_status TEXT CHECK(cert_status IN ('valid', 'expiring_soon', 'expired', 'unknown', 'error')),
+  cert_expiry TEXT,
+  cert_issuer TEXT,
+  last_checked TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
-);
-
--- 证书状态表
-CREATE TABLE IF NOT EXISTS certificate_status (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  domain_id INTEGER NOT NULL UNIQUE,
-  issuer TEXT,
-  valid_from TEXT,
-  valid_to TEXT,
-  days_remaining INTEGER,
-  last_checked TEXT DEFAULT (datetime('now')),
-  status TEXT CHECK(status IN ('valid', 'expiring', 'expired', 'error')) DEFAULT 'error',
-  error_message TEXT,
-  FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE
 );
 
 -- 凭证表
@@ -57,9 +47,10 @@ CREATE TABLE IF NOT EXISTS scheduler_config (
 
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain);
-CREATE INDEX IF NOT EXISTS idx_cert_status_domain_id ON certificate_status(domain_id);
+CREATE INDEX IF NOT EXISTS idx_domains_cert_status ON domains(cert_status);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_target ON audit_logs(target_type, target_id);
 
 -- 插入默认调度配置
 INSERT OR IGNORE INTO scheduler_config (task_type, cron_expression, enabled)

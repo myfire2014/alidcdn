@@ -2,9 +2,13 @@
 export interface Domain {
   id: number;
   domain: string;
-  description: string | null;
-  cloudflare_zone_id: string | null;
-  aliyun_dcdn_domain: string | null;
+  notes: string | null;
+  auto_renew: boolean;
+  dcdn_enabled: boolean;
+  cert_status: 'valid' | 'expiring_soon' | 'expired' | 'unknown' | 'error' | null;
+  cert_expiry: string | null;
+  cert_issuer: string | null;
+  last_checked: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -52,20 +56,19 @@ export interface SchedulerConfig {
 // Domain Service Types
 export interface CreateDomainInput {
   domain: string;
-  description?: string;
-  cloudflare_zone_id?: string;
-  aliyun_dcdn_domain?: string;
+  notes?: string;
+  auto_renew?: boolean;
+  dcdn_enabled?: boolean;
 }
 
 export interface UpdateDomainInput {
-  domain?: string;
-  description?: string;
-  cloudflare_zone_id?: string;
-  aliyun_dcdn_domain?: string;
+  notes?: string;
+  auto_renew?: boolean;
+  dcdn_enabled?: boolean;
 }
 
 export interface DomainWithStatus extends Domain {
-  cert_status: CertificateStatus | null;
+  // Domain already includes cert_status fields
 }
 
 // Certificate Types
@@ -148,7 +151,8 @@ export interface LogEntry {
 export interface LogFilter {
   action?: string;
   targetType?: string;
-  status?: string;
+  targetId?: number;
+  status?: 'success' | 'failure';
   startDate?: Date;
   endDate?: Date;
   page?: number;

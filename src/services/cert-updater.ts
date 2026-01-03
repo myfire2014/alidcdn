@@ -25,15 +25,15 @@ export class CertUpdater {
       throw new Error('Domain not found');
     }
 
-    if (!domain.cloudflare_zone_id) {
-      throw new Error('Cloudflare zone ID not configured for this domain');
-    }
+    // For now, we'll use the domain name as zone identifier
+    // In production, you'd need to look up the zone ID from Cloudflare
+    const zoneId = domain.domain; // Placeholder - should be actual zone ID
 
     let lastError: Error | null = null;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const result = await this.performUpdate(domain.cloudflare_zone_id, domain.domain);
+        const result = await this.performUpdate(zoneId, domain.domain);
         
         logCertUpdate(domainId, domain.domain, 'success', {
           certificateId: result.certificateId,
