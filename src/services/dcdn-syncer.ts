@@ -17,6 +17,15 @@ export interface DCDNCertStatus {
   certType: string;
 }
 
+export interface DCDNDomainInfo {
+  domainName: string;
+  domainStatus: string;
+  sslProtocol: string;
+  gmtCreated: string;
+  gmtModified: string;
+  cname: string;
+}
+
 export interface SyncResult {
   success: boolean;
   message: string;
@@ -204,6 +213,53 @@ export class DCDNSyncer {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Get all DCDN domains from Aliyun
+   */
+  async listDCDNDomains(): Promise<DCDNDomainInfo[]> {
+    const domains: DCDNDomainInfo[] = [];
+    let pageNumber = 1;
+    const pageSize = 50;
+
+    while (true) {
+      const result = await this.request<{
+        Domains?: {
+          PageData?: Array<{
+            DomainName: string;
+            DomainStatus: string;
+            SSLProtocol: string;
+            GmtCreated: string;
+            GmtModified: string;
+            Cname: string;
+          }>;
+        };
+        TotalCount?: number;
+      }>('DescribeDcdnUserDomains', {
+        PageSize: pageSize.toString(),
+        PageNumber: pageNumber.toString()
+      });
+
+      const pageData = result.Domains?.PageData || [];
+      for (const item of pageData) {
+        domains.push({
+          domainName: item.DomainName.replace(/\.$/, ''), // Remove trailing dot (FQDN format)
+          domainStatus: item.DomainStatus,
+          sslProtocol: item.SSLProtocol,
+          gmtCreated: item.GmtCreated,
+          gmtModified: item.GmtModified,
+          cname: item.Cname
+        });
+      }
+
+      if (pageData.length < pageSize || domains.length >= (result.TotalCount || 0)) {
+        break;
+      }
+      pageNumber++;
+    }
+
+    return domains;
   }
 
   private delay(ms: number): Promise<void> {

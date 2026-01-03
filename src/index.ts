@@ -3,6 +3,10 @@ import { html } from '@elysiajs/html';
 import { initDatabase } from './db';
 import { scheduler } from './services/scheduler';
 import { auditLogger } from './services/audit-logger';
+import { taskQueue } from './services/task-queue';
+import { certMonitor } from './services/cert-monitor';
+import { certUpdater } from './services/cert-updater';
+import { dcdnSyncer } from './services/dcdn-syncer';
 
 // Routes
 import { pagesRoute } from './routes/pages';
@@ -14,6 +18,25 @@ import { healthApi } from './routes/api/health';
 
 // Initialize database
 initDatabase();
+
+// Setup task executor
+taskQueue.setExecutor(async (task) => {
+  switch (task.type) {
+    case 'check':
+      await certMonitor.executeCheckTask(task);
+      break;
+    case 'update':
+      await certUpdater.executeUpdateTask(task);
+      break;
+    case 'sync':
+      // DCDN sync requires certificate data, which should be passed separately
+      // For now, just mark as needing certificate
+      taskQueue.completeTask(task.id, false, 'Certificate data required for sync');
+      break;
+    default:
+      taskQueue.completeTask(task.id, false, `Unknown task type: ${task.type}`);
+  }
+});
 
 // Create app
 const app = new Elysia()

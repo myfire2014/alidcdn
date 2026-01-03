@@ -177,6 +177,51 @@ export class CloudflareClient {
       csr: '' // Let Cloudflare generate
     });
   }
+
+  /**
+   * List DNS records
+   */
+  async listDnsRecords(zoneId: string, filters?: { type?: string; name?: string }): Promise<Array<{
+    id: string;
+    type: string;
+    name: string;
+    content: string;
+    ttl: number;
+  }>> {
+    let endpoint = `/zones/${zoneId}/dns_records`;
+    const params = new URLSearchParams();
+    if (filters?.type) params.append('type', filters.type);
+    if (filters?.name) params.append('name', filters.name);
+    if (params.toString()) endpoint += `?${params.toString()}`;
+    
+    return this.request('GET', endpoint);
+  }
+
+  /**
+   * Create DNS record
+   */
+  async createDnsRecord(zoneId: string, record: {
+    type: string;
+    name: string;
+    content: string;
+    ttl?: number;
+    proxied?: boolean;
+  }): Promise<{ id: string }> {
+    return this.request('POST', `/zones/${zoneId}/dns_records`, {
+      type: record.type,
+      name: record.name,
+      content: record.content,
+      ttl: record.ttl || 1, // 1 = auto
+      proxied: record.proxied ?? false
+    });
+  }
+
+  /**
+   * Delete DNS record
+   */
+  async deleteDnsRecord(zoneId: string, recordId: string): Promise<{ id: string }> {
+    return this.request('DELETE', `/zones/${zoneId}/dns_records/${recordId}`);
+  }
 }
 
 // Singleton instance

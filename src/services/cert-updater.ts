@@ -1,8 +1,11 @@
+import * as acme from 'acme-client';
 import { domainService } from './domain-service';
 import { cloudflareClient } from './cloudflare-client';
+import { dcdnSyncer } from './dcdn-syncer';
 import { taskQueue } from './task-queue';
 import { sseController } from '../controllers/sse-controller';
 import { logCertUpdate } from './audit-logger';
+import { certMonitor } from './cert-monitor';
 import type { TaskStatus } from '../types';
 
 const MAX_RETRIES = 3;
@@ -11,13 +14,16 @@ const RETRY_DELAY_MS = 5000;
 export interface UpdateResult {
   success: boolean;
   message: string;
-  certificateId?: string;
+  certificate?: string;
+  privateKey?: string;
   expiresOn?: string;
 }
 
 export class CertUpdater {
+  private useStaging = false; // Set to true for testing
+
   /**
-   * Update certificate for a domain via Cloudflare
+   * Update certificate for a domain - 申请 Let's Encrypt 证书并上传到 DCDN
    */
   async updateCertificate(domainId: number): Promise<UpdateResult> {
     const domain = domainService.get(domainId);
@@ -25,29 +31,27 @@ export class CertUpdater {
       throw new Error('Domain not found');
     }
 
-    // For now, we'll use the domain name as zone identifier
-    // In production, you'd need to look up the zone ID from Cloudflare
-    const zoneId = domain.domain; // Placeholder - should be actual zone ID
-
     let lastError: Error | null = null;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const result = await this.performUpdate(zoneId, domain.domain);
+        const result = await this.performUpdate(domain.domain, domain.dcdn_enabled);
         
         logCertUpdate(domainId, domain.domain, 'success', {
-          certificateId: result.certificateId,
           expiresOn: result.expiresOn
         });
 
         sseController.broadcastDomainUpdate(domainId, domain.domain, {
-          action: 'cert_updated',
-          certificateId: result.certificateId
+          action: 'cert_updated'
         });
+
+        // Re-check certificate status after update
+        await certMonitor.checkDomain(domain.domain);
 
         return result;
       } catch (error) {
         lastError = error instanceof Error ? error : new Error('Unknown error');
+        console.error(`Certificate update attempt ${attempt} failed:`, lastError.message);
         
         if (attempt < MAX_RETRIES) {
           await this.delay(RETRY_DELAY_MS * attempt);
@@ -66,50 +70,130 @@ export class CertUpdater {
   }
 
   /**
-   * Perform the actual certificate update
+   * Perform the actual certificate update via Let's Encrypt
    */
-  private async performUpdate(zoneId: string, domain: string): Promise<UpdateResult> {
-    // Get current certificates
-    const certs = await cloudflareClient.getZoneCertificates(zoneId);
+  private async performUpdate(domain: string, syncToDcdn: boolean): Promise<UpdateResult> {
+    // Step 1: Create account key
+    const accountKey = await acme.crypto.createPrivateRsaKey();
     
-    // Find certificate for this domain
-    const existingCert = certs.find(c => 
-      c.hosts.some(h => h === domain || h === `*.${domain}` || domain.endsWith(h.replace('*.', '.')))
-    );
+    // Step 2: Create ACME client
+    const client = new acme.Client({
+      directoryUrl: this.useStaging 
+        ? acme.directory.letsencrypt.staging 
+        : acme.directory.letsencrypt.production,
+      accountKey
+    });
 
-    if (existingCert && existingCert.status === 'active') {
-      // Check if renewal is needed
-      const expiresOn = new Date(existingCert.expires_on);
-      const daysUntilExpiry = Math.floor((expiresOn.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-      
-      if (daysUntilExpiry > 30) {
-        return {
-          success: true,
-          message: `Certificate is still valid for ${daysUntilExpiry} days`,
-          certificateId: existingCert.id,
-          expiresOn: existingCert.expires_on
-        };
-      }
+    // Step 3: Create CSR
+    const [certificateKey, certificateCsr] = await acme.crypto.createCsr({
+      altNames: [domain]
+    });
 
-      // Restart validation to trigger renewal
-      const renewed = await cloudflareClient.restartValidation(zoneId, existingCert.id);
-      return {
-        success: true,
-        message: 'Certificate renewal initiated',
-        certificateId: renewed.id,
-        expiresOn: renewed.expires_on
-      };
+    // Step 4: Get Cloudflare zone ID for DNS challenge
+    const zoneId = await this.getCloudflareZoneId(domain);
+    if (!zoneId) {
+      throw new Error(`Cloudflare zone not found for ${domain}. DNS must be managed by Cloudflare.`);
     }
 
-    // Order new certificate
-    const newCert = await cloudflareClient.orderAdvancedCertificate(zoneId, [domain, `*.${domain}`]);
-    
-    return {
-      success: true,
-      message: 'New certificate ordered',
-      certificateId: newCert.id,
-      expiresOn: newCert.expires_on
-    };
+    // Track created DNS records for cleanup
+    const createdRecords: Array<{ zoneId: string; recordId: string }> = [];
+
+    try {
+      // Step 5: Use auto mode to get certificate
+      const certificate = await client.auto({
+        csr: certificateCsr,
+        termsOfServiceAgreed: true,
+        challengePriority: ['dns-01'],
+        challengeCreateFn: async (authz, challenge, keyAuthorization) => {
+          if (challenge.type !== 'dns-01') {
+            throw new Error(`Unsupported challenge type: ${challenge.type}`);
+          }
+
+          const recordName = `_acme-challenge.${authz.identifier.value}`;
+          console.log(`Creating DNS TXT record: ${recordName} = ${keyAuthorization}`);
+
+          const record = await cloudflareClient.createDnsRecord(zoneId, {
+            type: 'TXT',
+            name: recordName,
+            content: keyAuthorization,
+            ttl: 60
+          });
+
+          createdRecords.push({ zoneId, recordId: record.id });
+
+          // Wait for DNS propagation
+          console.log('Waiting for DNS propagation...');
+          await this.delay(10000);
+        },
+        challengeRemoveFn: async (authz, challenge, keyAuthorization) => {
+          // Cleanup will be done in finally block
+          console.log(`Challenge completed for ${authz.identifier.value}`);
+        }
+      });
+
+      // Step 6: Sync to DCDN if enabled
+      if (syncToDcdn) {
+        const domainData = domainService.getByDomain(domain);
+        if (domainData) {
+          console.log('Syncing certificate to DCDN...');
+          await dcdnSyncer.syncCertificate(
+            domainData.id, 
+            certificate, 
+            certificateKey.toString()
+          );
+        }
+      }
+
+      // Calculate expiry (Let's Encrypt certs are valid for 90 days)
+      const expiresOn = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+
+      return {
+        success: true,
+        message: syncToDcdn 
+          ? 'Certificate issued and synced to DCDN successfully' 
+          : 'Certificate issued successfully',
+        certificate,
+        privateKey: certificateKey.toString(),
+        expiresOn
+      };
+    } finally {
+      // Cleanup DNS records
+      for (const record of createdRecords) {
+        try {
+          await cloudflareClient.deleteDnsRecord(record.zoneId, record.recordId);
+          console.log(`Cleaned up DNS record: ${record.recordId}`);
+        } catch (error) {
+          console.error(`Failed to cleanup DNS record ${record.recordId}:`, error);
+        }
+      }
+    }
+  }
+
+  /**
+   * Get Cloudflare Zone ID for domain
+   */
+  private async getCloudflareZoneId(domain: string): Promise<string | null> {
+    try {
+      const zones = await cloudflareClient.listZones();
+      
+      // Try exact match
+      let zone = zones.find(z => z.name === domain);
+      
+      // Try parent domain (for subdomains)
+      if (!zone) {
+        const parts = domain.split('.');
+        for (let i = 1; i < parts.length - 1; i++) {
+          const parent = parts.slice(i).join('.');
+          zone = zones.find(z => z.name === parent);
+          if (zone) break;
+        }
+      }
+      
+      return zone?.id ?? null;
+    } catch (error) {
+      console.error('Failed to get Cloudflare zone:', error);
+      return null;
+    }
   }
 
   /**
@@ -131,10 +215,10 @@ export class CertUpdater {
    * Execute update task (called by task queue)
    */
   async executeUpdateTask(task: TaskStatus): Promise<void> {
-    taskQueue.updateProgress(task.id, 10, 'Connecting to Cloudflare...');
+    taskQueue.updateProgress(task.id, 10, 'Starting certificate request...');
 
     try {
-      taskQueue.updateProgress(task.id, 30, 'Checking certificate status...');
+      taskQueue.updateProgress(task.id, 20, 'Creating ACME order...');
       const result = await this.updateCertificate(task.domainId);
 
       if (result.success) {
@@ -146,31 +230,6 @@ export class CertUpdater {
       const message = error instanceof Error ? error.message : 'Unknown error';
       taskQueue.completeTask(task.id, false, `Update failed: ${message}`, message);
     }
-  }
-
-  /**
-   * Get Cloudflare certificate status for a zone
-   */
-  async getCloudflareStatus(zoneId: string): Promise<{
-    status: string;
-    certificates: Array<{
-      id: string;
-      hosts: string[];
-      expiration: string;
-      status: string;
-    }>;
-  }> {
-    const certs = await cloudflareClient.getZoneCertificates(zoneId);
-    
-    return {
-      status: certs.length > 0 ? 'active' : 'none',
-      certificates: certs.map(c => ({
-        id: c.id,
-        hosts: c.hosts,
-        expiration: c.expires_on,
-        status: c.status
-      }))
-    };
   }
 
   private delay(ms: number): Promise<void> {

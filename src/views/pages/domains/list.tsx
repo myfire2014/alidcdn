@@ -13,9 +13,14 @@ export function DomainsListPage({ domains }: DomainsListProps) {
       <div class="space-y-6">
         <div class="flex justify-between items-center">
           <h1 class="text-2xl font-bold text-gray-900">域名管理</h1>
-          <Button hx-get="/domains/new" hx-target="#modal-container" hx-swap="innerHTML">
-            添加域名
-          </Button>
+          <div class="flex gap-2">
+            <Button variant="secondary" onclick="openDCDNImportModal()">
+              从 DCDN 导入
+            </Button>
+            <Button hx-get="/domains/new" hx-target="#modal-container" hx-swap="innerHTML">
+              添加域名
+            </Button>
+          </div>
         </div>
 
         <Card>
@@ -26,6 +31,92 @@ export function DomainsListPage({ domains }: DomainsListProps) {
 
         {/* Modal Container */}
         <div id="modal-container"></div>
+
+        {/* DCDN Import Modal */}
+        <div id="dcdn-import-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
+            <div class="px-6 py-4 border-b flex justify-between items-center">
+              <h3 class="text-lg font-semibold">从 DCDN 导入域名</h3>
+              <button onclick="closeDCDNImportModal()" class="text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+            <div id="dcdn-domains-content" class="p-6 overflow-y-auto flex-1">
+              <div class="text-center py-8">
+                <div class="animate-spin h-8 w-8 border-4 border-indigo-500 border-t-transparent rounded-full mx-auto"></div>
+                <p class="mt-4 text-gray-500">正在获取 DCDN 域名列表...</p>
+              </div>
+            </div>
+            <div class="px-6 py-4 border-t flex justify-end gap-2">
+              <Button variant="secondary" onclick="closeDCDNImportModal()">取消</Button>
+              <Button id="import-selected-btn" onclick="importSelectedDomains()" disabled>导入选中</Button>
+            </div>
+          </div>
+        </div>
+
+        <script>{`
+          async function openDCDNImportModal() {
+            document.getElementById('dcdn-import-modal').classList.remove('hidden');
+            try {
+              const res = await fetch('/api/domains/dcdn-list');
+              const data = await res.json();
+              if (data.error) throw new Error(data.error);
+              renderDCDNDomains(data.domains);
+            } catch (e) {
+              document.getElementById('dcdn-domains-content').innerHTML = 
+                '<div class="text-center py-8 text-red-500">获取失败: ' + e.message + '</div>';
+            }
+          }
+
+          function closeDCDNImportModal() {
+            document.getElementById('dcdn-import-modal').classList.add('hidden');
+          }
+
+          function renderDCDNDomains(domains) {
+            if (!domains.length) {
+              document.getElementById('dcdn-domains-content').innerHTML = 
+                '<div class="text-center py-8 text-gray-500">没有找到 DCDN 域名</div>';
+              return;
+            }
+            const statusMap = { online: '正常', offline: '停用', configuring: '配置中', checking: '审核中', check_failed: '审核失败' };
+            const html = '<div class="mb-4 flex items-center gap-2"><input type="checkbox" id="select-all-dcdn" onchange="toggleAllDCDN(this)" class="rounded" /><label for="select-all-dcdn" class="text-sm text-gray-600">全选</label><span class="ml-auto text-sm text-gray-500">共 ' + domains.length + ' 个域名</span></div>' +
+              '<div class="space-y-2 max-h-96 overflow-y-auto">' + domains.map(d => 
+                '<label class="flex items-center gap-3 p-3 border rounded hover:bg-gray-50 cursor-pointer">' +
+                  '<input type="checkbox" name="dcdn_domain" value="' + d.domainName + '" class="rounded dcdn-checkbox" onchange="updateImportBtn()" />' +
+                  '<div class="flex-1 min-w-0"><div class="font-medium truncate">' + d.domainName + '</div>' +
+                  '<div class="text-xs text-gray-500">状态: ' + (statusMap[d.domainStatus] || d.domainStatus) + ' | SSL: ' + (d.sslProtocol === 'on' ? '已开启' : '未开启') + '</div></div></label>'
+              ).join('') + '</div>';
+            document.getElementById('dcdn-domains-content').innerHTML = html;
+          }
+
+          function toggleAllDCDN(checkbox) {
+            document.querySelectorAll('.dcdn-checkbox').forEach(cb => cb.checked = checkbox.checked);
+            updateImportBtn();
+          }
+
+          function updateImportBtn() {
+            const count = document.querySelectorAll('.dcdn-checkbox:checked').length;
+            const btn = document.getElementById('import-selected-btn');
+            btn.disabled = count === 0;
+            btn.textContent = count > 0 ? '导入选中 (' + count + ')' : '导入选中';
+          }
+
+          async function importSelectedDomains() {
+            const selected = Array.from(document.querySelectorAll('.dcdn-checkbox:checked')).map(cb => cb.value);
+            if (!selected.length) return;
+            try {
+              const res = await fetch('/api/domains/import-dcdn', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ domains: selected })
+              });
+              const data = await res.json();
+              if (data.error) throw new Error(data.error);
+              closeDCDNImportModal();
+              alert('导入成功: ' + data.imported.length + ' 个' + (data.skipped.length ? ', 跳过: ' + data.skipped.length + ' 个(已存在)' : ''));
+            } catch (e) {
+              alert('导入失败: ' + e.message);
+            }
+          }
+        `}</script>
 
         {/* SSE Connection */}
         <div sse-connect="/events" sse-swap="message" style="display:none"></div>
@@ -109,7 +200,7 @@ function DomainRow({ domain }: { domain: Domain }) {
   return (
     <tr class="hover:bg-gray-50" id={`domain-${domain.id}`}>
       <td class="py-3 pr-4">
-        <input type="checkbox" name="domain_ids" value={domain.id} class="rounded" />
+        <input type="checkbox" name="domain_ids" value={String(domain.id)} class="rounded" />
       </td>
       <td class="py-3">
         <a href={`/domains/${domain.id}`} class="font-medium text-indigo-600 hover:text-indigo-700">

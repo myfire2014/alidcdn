@@ -120,8 +120,12 @@ export const domainsApi = new Elysia({ prefix: '/api/domains' })
       const id = parseInt(params.id);
       const domain = domainService.get(id);
       if (!domain) { set.status = 404; return { error: 'Not found' }; }
-      await certUpdater.updateCertificate(id);
-      return { success: true };
+      const result = await certUpdater.updateCertificate(id);
+      if (!result.success) {
+        set.status = 500;
+        return { error: result.message };
+      }
+      return { success: true, message: result.message, certificateId: result.certificateId };
     } catch (error) {
       set.status = 500;
       return { error: error instanceof Error ? error.message : 'Failed' };
@@ -141,6 +145,59 @@ export const domainsApi = new Elysia({ prefix: '/api/domains' })
       return { error: error instanceof Error ? error.message : 'Failed' };
     }
   }, { params: t.Object({ id: t.String() }) })
+
+  .get('/dcdn-list', async ({ set }) => {
+    try {
+      const domains = await dcdnSyncer.listDCDNDomains();
+      return { success: true, domains };
+    } catch (error) {
+      set.status = 500;
+      return { error: error instanceof Error ? error.message : 'Failed to fetch DCDN domains' };
+    }
+  })
+
+  .post('/import-dcdn', async ({ body, set }) => {
+    try {
+      const domainNames = Array.isArray(body.domains) ? body.domains : [body.domains];
+      const imported: string[] = [];
+      const skipped: string[] = [];
+
+      for (let domainName of domainNames) {
+        // Clean domain: remove trailing dot (FQDN format) and trim
+        domainName = domainName.trim().replace(/\.$/, '');
+        
+        if (!domainName) continue;
+
+        const existing = domainService.list().find(d => d.domain === domainName.toLowerCase());
+        if (existing) {
+          skipped.push(domainName);
+          continue;
+        }
+        domainService.create({
+          domain: domainName,
+          dcdn_enabled: true,
+          auto_renew: false
+        });
+        imported.push(domainName);
+      }
+
+      if (imported.length > 0) {
+        auditLogger.log({
+          action: 'domain_import',
+          targetType: 'domain',
+          targetId: 0,
+          details: { imported, skipped },
+          status: 'success'
+        });
+        sseController.broadcast({ type: 'domain_updated', data: {} });
+      }
+
+      return { success: true, imported, skipped };
+    } catch (error) {
+      set.status = 400;
+      return { error: error instanceof Error ? error.message : 'Import failed' };
+    }
+  }, { body: t.Object({ domains: t.Union([t.Array(t.String()), t.String()]) }) })
 
   .post('/batch/check', async ({ body }) => {
     const ids = Array.isArray(body.domain_ids) ? body.domain_ids : [body.domain_ids];
