@@ -1,5 +1,5 @@
 import { Elysia, t } from 'elysia';
-import { html } from '@elysiajs/html';
+import { html, Html } from '@elysiajs/html';
 import { DashboardPage } from '../views/pages/dashboard';
 import { DomainsListPage } from '../views/pages/domains/list';
 import { DomainDetailPage } from '../views/pages/domains/detail';

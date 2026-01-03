@@ -1,17 +1,11 @@
 import { getDatabase } from '../db';
-import { encrypt, decrypt, isEncryptionKeyConfigured } from '../utils/crypto';
 import type { Credential } from '../types';
 
 export class CredentialStore {
   /**
-   * Store an encrypted credential
+   * Store a credential
    */
   async setCredential(provider: string, keyName: string, value: string): Promise<void> {
-    if (!isEncryptionKeyConfigured()) {
-      throw new Error('Encryption key not configured');
-    }
-    
-    const encryptedValue = await encrypt(value);
     const db = getDatabase();
     const now = new Date().toISOString();
     
@@ -21,17 +15,13 @@ export class CredentialStore {
       ON CONFLICT(provider, key_name) DO UPDATE SET
         encrypted_value = excluded.encrypted_value,
         updated_at = excluded.updated_at
-    `, [provider, keyName, encryptedValue, now, now]);
+    `, [provider, keyName, value, now, now]);
   }
 
   /**
-   * Get a decrypted credential
+   * Get a credential
    */
   async getCredential(provider: string, keyName: string): Promise<string | null> {
-    if (!isEncryptionKeyConfigured()) {
-      throw new Error('Encryption key not configured');
-    }
-    
     const db = getDatabase();
     const row = db.query<Credential, [string, string]>(
       'SELECT * FROM credentials WHERE provider = ? AND key_name = ?'
@@ -39,7 +29,7 @@ export class CredentialStore {
     
     if (!row) return null;
     
-    return decrypt(row.encrypted_value);
+    return row.encrypted_value;
   }
 
   /**

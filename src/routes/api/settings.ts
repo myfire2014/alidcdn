@@ -21,10 +21,8 @@ export const settingsApi = new Elysia({ prefix: '/api/settings' })
         status: 'success'
       });
 
-      set.headers['HX-Trigger'] = JSON.stringify({ 
-        showMessage: { type: 'success', text: 'Cloudflare 配置已保存' }
-      });
-      return { success: true };
+      set.headers['HX-Trigger'] = 'settingsSaved';
+      return { success: true, message: 'Cloudflare 配置已保存' };
     } catch (error) {
       set.status = 400;
       return { error: error instanceof Error ? error.message : 'Failed to save credentials' };
@@ -53,10 +51,8 @@ export const settingsApi = new Elysia({ prefix: '/api/settings' })
         status: 'success'
       });
 
-      set.headers['HX-Trigger'] = JSON.stringify({ 
-        showMessage: { type: 'success', text: '阿里云配置已保存' }
-      });
-      return { success: true };
+      set.headers['HX-Trigger'] = 'settingsSaved';
+      return { success: true, message: '阿里云配置已保存' };
     } catch (error) {
       set.status = 400;
       return { error: error instanceof Error ? error.message : 'Failed to save credentials' };
@@ -76,10 +72,8 @@ export const settingsApi = new Elysia({ prefix: '/api/settings' })
         enabled: body.enabled === 'on' || body.enabled === true
       });
 
-      set.headers['HX-Trigger'] = JSON.stringify({ 
-        showMessage: { type: 'success', text: '调度配置已保存' }
-      });
-      return { success: true };
+      set.headers['HX-Trigger'] = 'settingsSaved';
+      return { success: true, message: '调度配置已保存' };
     } catch (error) {
       set.status = 400;
       return { error: error instanceof Error ? error.message : 'Failed to save scheduler config' };
