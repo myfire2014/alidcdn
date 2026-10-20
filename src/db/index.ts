@@ -32,11 +32,33 @@ export function initDatabase(dbPath: string = DB_PATH): Database {
   // Read and execute schema
   const schemaPath = join(import.meta.dir, 'schema.sql');
   const schema = readFileSync(schemaPath, 'utf-8');
-  
+
   // Execute the entire schema as a single transaction
   db.exec(schema);
-  
+
+  // Migrate existing databases (CREATE TABLE IF NOT EXISTS won't add new columns)
+  migrate(db);
+
   return db;
+}
+
+/**
+ * Add a column to a table if it doesn't exist yet
+ */
+function ensureColumn(database: Database, table: string, column: string, ddl: string): void {
+  const columns = database.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!columns.some(col => col.name === column)) {
+    database.run(ddl);
+  }
+}
+
+function migrate(database: Database): void {
+  ensureColumn(
+    database,
+    'domains',
+    'alt_domains',
+    'ALTER TABLE domains ADD COLUMN alt_domains TEXT'
+  );
 }
 
 export function closeDatabase(): void {

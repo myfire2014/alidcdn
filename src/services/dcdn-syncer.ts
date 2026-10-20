@@ -1,9 +1,10 @@
 import { credentialStore } from './credential-store';
-import { domainService } from './domain-service';
+import { domainService, getCertNames } from './domain-service';
 import { taskQueue } from './task-queue';
 import { sseController } from '../controllers/sse-controller';
 import { logDCDNSync } from './audit-logger';
 import { buildSignedUrl } from '../utils/aliyun-signature';
+import { certCoversName } from '../utils/validators';
 import type { TaskStatus } from '../types';
 
 const DCDN_ENDPOINT = 'https://dcdn.aliyuncs.com';
@@ -26,9 +27,23 @@ export interface DCDNDomainInfo {
   cname: string;
 }
 
+export interface DCDNSyncItemResult {
+  domainName: string;
+  success: boolean;
+  error?: string;
+}
+
 export interface SyncResult {
   success: boolean;
   message: string;
+  results?: DCDNSyncItemResult[];
+}
+
+export interface StoredCertificate {
+  certificate: string;
+  privateKey: string;
+  names: string[];
+  expiresOn: string | null;
 }
 
 export class DCDNSyncer {
@@ -51,7 +66,7 @@ export class DCDNSyncer {
    */
   private async request<T>(action: string, params: Record<string, string> = {}): Promise<T> {
     const { accessKeyId, accessKeySecret } = await this.getCredentials();
-    
+
     const url = await buildSignedUrl(DCDN_ENDPOINT, accessKeyId, accessKeySecret, {
       Action: action,
       ...params
@@ -68,65 +83,174 @@ export class DCDNSyncer {
   }
 
   /**
-   * Sync certificate to DCDN domain
+   * 找出与域名条目证书相关的所有 DCDN 域名。
+   * 证书覆盖规则: 精确匹配,或泛域名 *.base 覆盖其单级子域/泛域名自身。
+   */
+  async getMatchingDCDNDomains(domainId: number): Promise<DCDNDomainInfo[]> {
+    const domain = domainService.get(domainId);
+    if (!domain) {
+      throw new Error('Domain not found');
+    }
+
+    const names = getCertNames(domain);
+    const dcdnDomains = await this.listDCDNDomains();
+
+    return dcdnDomains.filter(item => certCoversName(names, item.domainName));
+  }
+
+  /**
+   * Store an issued certificate (called after issuance) so it can be
+   * re-synced to DCDN without re-issuing
+   */
+  async storeIssuedCertificate(
+    domainId: number,
+    certificate: string,
+    privateKey: string,
+    names: string[],
+    expiresOn: string
+  ): Promise<void> {
+    await credentialStore.setCredential('certificate', `cert:${domainId}`, certificate);
+    await credentialStore.setCredential('certificate', `key:${domainId}`, privateKey);
+    await credentialStore.setCredential('certificate', `names:${domainId}`, JSON.stringify(names));
+    await credentialStore.setCredential('certificate', `expires:${domainId}`, expiresOn);
+  }
+
+  /**
+   * Load the last issued certificate for a domain entry
+   */
+  async getStoredCertificate(domainId: number): Promise<StoredCertificate | null> {
+    const certificate = await credentialStore.getCredential('certificate', `cert:${domainId}`);
+    const privateKey = await credentialStore.getCredential('certificate', `key:${domainId}`);
+    if (!certificate || !privateKey) {
+      return null;
+    }
+
+    const namesRaw = await credentialStore.getCredential('certificate', `names:${domainId}`);
+    const expiresOn = await credentialStore.getCredential('certificate', `expires:${domainId}`);
+
+    let names: string[] = [];
+    try {
+      const parsed = namesRaw ? JSON.parse(namesRaw) : null;
+      if (Array.isArray(parsed)) names = parsed.map(String);
+    } catch {
+      names = [];
+    }
+
+    return {
+      certificate,
+      privateKey,
+      names,
+      expiresOn: expiresOn || null
+    };
+  }
+
+  /**
+   * Sync certificate to all related DCDN domains (or an explicit selection).
+   * 多域名/泛域名证书会应用到每一个相关联的 DCDN 域名上。
    */
   async syncCertificate(
     domainId: number,
     certificate: string,
-    privateKey: string
+    privateKey: string,
+    options: { domains?: string[]; certName?: string } = {}
   ): Promise<SyncResult> {
     const domain = domainService.get(domainId);
     if (!domain) {
       throw new Error('Domain not found');
     }
 
-    if (!domain.dcdn_enabled) {
-      throw new Error('DCDN not enabled for this domain');
+    // Determine target DCDN domains
+    let targets: string[];
+    if (options.domains && options.domains.length > 0) {
+      targets = [...new Set(options.domains.map(d => d.trim().replace(/\.$/, '').toLowerCase()))].filter(Boolean);
+    } else {
+      const matched = await this.getMatchingDCDNDomains(domainId);
+      targets = matched.map(item => item.domainName);
     }
 
+    if (targets.length === 0) {
+      logDCDNSync(domainId, domain.domain, 'failure', { error: '没有匹配的 DCDN 域名' });
+      return {
+        success: false,
+        message: '没有找到与该证书相关的 DCDN 域名,请确认域名已添加到 DCDN',
+        results: []
+      };
+    }
+
+    // Aliyun rejects re-uploading under an existing CertName ("The CertName already exists."),
+    // so every target domain gets its own fresh, timestamped cert name per upload.
+    const makeCertName = (target: string) =>
+      `le-${target}-${new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)}`;
+
+    const results: DCDNSyncItemResult[] = [];
+    const pending = new Set(targets);
     let lastError: Error | null = null;
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        await this.request('SetDcdnDomainSSLCertificate', {
-          DomainName: domain.domain,
-          SSLProtocol: 'on',
-          SSLPub: certificate,
-          SSLPri: privateKey,
-          CertType: 'upload',
-          CertName: `cert-${domain.domain}-${Date.now()}`
-        });
-
-        logDCDNSync(domainId, domain.domain, 'success', {
-          dcdnDomain: domain.domain
-        });
-
-        sseController.broadcastDomainUpdate(domainId, domain.domain, {
-          action: 'dcdn_synced',
-          dcdnDomain: domain.domain
-        });
-
-        return {
-          success: true,
-          message: 'Certificate synced to DCDN successfully'
-        };
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error('Unknown error');
-        
-        if (attempt < MAX_RETRIES) {
-          await this.delay(RETRY_DELAY_MS * attempt);
+    for (let attempt = 1; attempt <= MAX_RETRIES && pending.size > 0; attempt++) {
+      for (const target of [...pending]) {
+        try {
+          await this.request('SetDcdnDomainSSLCertificate', {
+            DomainName: target,
+            SSLProtocol: 'on',
+            SSLPub: certificate,
+            SSLPri: privateKey,
+            CertType: 'upload',
+            CertName: makeCertName(target)
+          });
+          pending.delete(target);
+          results.push({ domainName: target, success: true });
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error('Unknown error');
         }
+      }
+
+      if (pending.size > 0 && attempt < MAX_RETRIES) {
+        await this.delay(RETRY_DELAY_MS * attempt);
       }
     }
 
-    logDCDNSync(domainId, domain.domain, 'failure', {
-      error: lastError?.message
+    for (const target of pending) {
+      results.push({ domainName: target, success: false, error: lastError?.message });
+    }
+
+    const succeeded = results.filter(r => r.success);
+    const failed = results.filter(r => !r.success);
+    const success = failed.length === 0;
+
+    logDCDNSync(domainId, domain.domain, success ? 'success' : 'failure', {
+      targets,
+      domains: succeeded.map(r => r.domainName),
+      failed: failed.map(r => ({ domain: r.domainName, error: r.error }))
     });
 
-    return {
-      success: false,
-      message: `Sync failed after ${MAX_RETRIES} attempts: ${lastError?.message}`
-    };
+    sseController.broadcastDomainUpdate(domainId, domain.domain, {
+      action: 'dcdn_synced',
+      dcdnDomains: succeeded.map(r => r.domainName)
+    });
+
+    const message = success
+      ? `已同步证书到 ${succeeded.length} 个 DCDN 域名`
+      : `${succeeded.length} 个成功, ${failed.length} 个失败: ${failed.map(f => `${f.domainName}(${f.error})`).join(', ')}`;
+
+    return { success, message, results };
+  }
+
+  /**
+   * Sync the stored certificate of a domain entry to DCDN
+   */
+  async syncStoredCertificate(
+    domainId: number,
+    options: { domains?: string[] } = {}
+  ): Promise<SyncResult> {
+    const stored = await this.getStoredCertificate(domainId);
+    if (!stored) {
+      return {
+        success: false,
+        message: '尚未签发证书,请先执行"更新证书"后再同步'
+      };
+    }
+
+    return this.syncCertificate(domainId, stored.certificate, stored.privateKey, options);
   }
 
   /**
@@ -179,18 +303,15 @@ export class DCDNSyncer {
   }
 
   /**
-   * Execute sync task (called by task queue)
+   * Execute sync task (called by task queue) - uploads the stored certificate
+   * to all related DCDN domains
    */
-  async executeSyncTask(
-    task: TaskStatus,
-    certificate: string,
-    privateKey: string
-  ): Promise<void> {
+  async executeSyncTask(task: TaskStatus): Promise<void> {
     taskQueue.updateProgress(task.id, 10, 'Connecting to Aliyun DCDN...');
 
     try {
       taskQueue.updateProgress(task.id, 30, 'Uploading certificate...');
-      const result = await this.syncCertificate(task.domainId, certificate, privateKey);
+      const result = await this.syncStoredCertificate(task.domainId);
 
       if (result.success) {
         taskQueue.completeTask(task.id, true, result.message);

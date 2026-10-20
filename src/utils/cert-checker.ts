@@ -10,18 +10,41 @@ export interface CertCheckOptions {
 }
 
 /**
- * Get SSL certificate information for a hostname
+ * Get the connectable host for a certificate name.
+ * Wildcard names (*.example.com) are checked against their base domain.
  */
-export function getCertInfo(hostname: string, options: CertCheckOptions = {}): Promise<CertInfo> {
+export function toConnectHost(hostname: string): string {
+  return hostname.startsWith('*.') ? hostname.slice(2) : hostname;
+}
+
+/**
+ * Parse the SAN extension ("DNS:a.com, DNS:*.b.com") into a name list
+ */
+function parseSubjectAltNames(cert: tls.PeerCertificate): string[] {
+  const san = (cert as unknown as { subjectaltname?: string }).subjectaltname;
+  if (!san) return [];
+  return san
+    .split(',')
+    .map(part => part.trim())
+    .filter(part => part.toUpperCase().startsWith('DNS:'))
+    .map(part => part.slice(4).toLowerCase());
+}
+
+/**
+ * Get SSL certificate information for a hostname.
+ * Wildcard hostnames (*.example.com) are checked against their base domain.
+ */
+export function getCertInfo(hostname: string, options: CertCheckOptions = {}): Promise<CertInfo & { subjectAltNames?: string[] }> {
   const port = options.port ?? DEFAULT_PORT;
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
+  const connectHost = toConnectHost(hostname);
 
   return new Promise((resolve, reject) => {
     const socket = tls.connect(
       {
-        host: hostname,
+        host: connectHost,
         port,
-        servername: hostname,
+        servername: connectHost,
         rejectUnauthorized: false, // Allow self-signed certs for checking
       },
       () => {
@@ -46,7 +69,8 @@ export function getCertInfo(hostname: string, options: CertCheckOptions = {}): P
             issuer,
             validFrom,
             validTo,
-            daysRemaining
+            daysRemaining,
+            subjectAltNames: parseSubjectAltNames(cert)
           });
         } catch (error) {
           socket.destroy();

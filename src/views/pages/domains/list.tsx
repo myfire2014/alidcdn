@@ -194,7 +194,130 @@ export function DomainsListPage({ domains }: DomainsListProps) {
               certUpdateEventSource = null;
             }
           }
+
+          // DCDN cert sync (upload stored certificate to selected related DCDN domains)
+          let dcdnSyncDomainId = null;
+
+          async function openDcdnSyncModal(domainId, domainName) {
+            dcdnSyncDomainId = domainId;
+            document.getElementById('dcdn-sync-title').textContent = '同步证书到 DCDN: ' + domainName;
+            const content = document.getElementById('dcdn-sync-content');
+            const uploadBtn = document.getElementById('dcdn-sync-upload-btn');
+            uploadBtn.disabled = true;
+            content.innerHTML = '<div class="text-center py-8"><div class="animate-spin h-8 w-8 border-4 border-indigo-500 border-t-transparent rounded-full mx-auto"></div><p class="mt-4 text-gray-500">正在获取相关联的 DCDN 域名...</p></div>';
+            document.getElementById('dcdn-sync-modal').classList.remove('hidden');
+
+            try {
+              const res = await fetch('/api/domains/' + domainId + '/dcdn-matches');
+              const data = await res.json();
+              if (data.error) throw new Error(data.error);
+              renderDcdnSyncDomains(data);
+            } catch (e) {
+              content.innerHTML = '<div class="text-center py-8 text-red-500">获取失败: ' + e.message + '</div>';
+            }
+          }
+
+          function renderDcdnSyncDomains(data) {
+            const content = document.getElementById('dcdn-sync-content');
+            const uploadBtn = document.getElementById('dcdn-sync-upload-btn');
+            const namesHtml = (data.certNames || []).map(n => '<span class="inline-flex items-center px-2 py-0.5 mx-1 mb-1 rounded bg-gray-100 text-gray-700 text-xs font-mono">' + n + '</span>').join('');
+            let html = '<div class="mb-4"><p class="text-sm text-gray-500 mb-2">证书覆盖域名:</p><div>' + namesHtml + '</div></div>';
+
+            if (!data.hasStoredCert) {
+              html += '<div class="p-3 rounded bg-yellow-50 text-yellow-700 text-sm">尚未签发证书,请先点击"更新"签发证书,签发成功后即可同步到 DCDN。</div>';
+              content.innerHTML = html;
+              return;
+            }
+
+            if (!data.domains || !data.domains.length) {
+              html += '<div class="p-3 rounded bg-yellow-50 text-yellow-700 text-sm">没有找到与该证书相关的 DCDN 域名,请确认相关域名已添加到阿里云 DCDN。</div>';
+              content.innerHTML = html;
+              return;
+            }
+
+            html += '<div class="mb-2 flex items-center gap-2"><input type="checkbox" id="select-all-dcdn-sync" onchange="toggleAllDcdnSync(this)" class="rounded" checked /><label for="select-all-dcdn-sync" class="text-sm text-gray-600">全选</label><span class="ml-auto text-sm text-gray-500">匹配到 ' + data.domains.length + ' 个 DCDN 域名</span></div>';
+            html += '<div class="space-y-2 max-h-72 overflow-y-auto">' + data.domains.map(d =>
+              '<label class="flex items-center gap-3 p-3 border rounded hover:bg-gray-50 cursor-pointer">' +
+                '<input type="checkbox" name="dcdn_sync_domain" value="' + d.domainName + '" class="rounded dcdn-sync-checkbox" onchange="updateDcdnSyncBtn()" checked />' +
+                '<div class="flex-1 min-w-0"><div class="font-medium truncate font-mono text-sm">' + d.domainName + '</div>' +
+                '<div class="text-xs text-gray-500">状态: ' + (d.domainStatus === 'online' ? '正常' : d.domainStatus) + ' | SSL: ' + (d.sslProtocol === 'on' ? '已开启' : '未开启') + '</div></div></label>'
+            ).join('') + '</div>';
+
+            content.innerHTML = html;
+            uploadBtn.disabled = false;
+          }
+
+          function toggleAllDcdnSync(checkbox) {
+            document.querySelectorAll('.dcdn-sync-checkbox').forEach(cb => cb.checked = checkbox.checked);
+            updateDcdnSyncBtn();
+          }
+
+          function updateDcdnSyncBtn() {
+            const count = document.querySelectorAll('.dcdn-sync-checkbox:checked').length;
+            const btn = document.getElementById('dcdn-sync-upload-btn');
+            btn.disabled = count === 0;
+            btn.textContent = count > 0 ? '上传选中 (' + count + ')' : '上传选中';
+          }
+
+          async function uploadSelectedDcdn() {
+            if (dcdnSyncDomainId === null) return;
+            const selected = Array.from(document.querySelectorAll('.dcdn-sync-checkbox:checked')).map(cb => cb.value);
+            if (!selected.length) return;
+
+            const btn = document.getElementById('dcdn-sync-upload-btn');
+            const content = document.getElementById('dcdn-sync-content');
+            btn.disabled = true;
+            btn.textContent = '正在上传...';
+            const logArea = document.createElement('div');
+            logArea.className = 'mt-4 p-3 bg-gray-50 rounded font-mono text-sm space-y-1';
+            content.appendChild(logArea);
+
+            try {
+              const res = await fetch('/api/domains/' + dcdnSyncDomainId + '/sync-dcdn', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ domains: selected })
+              });
+              const data = await res.json();
+              const rows = (data.results || []).map(r =>
+                '<div class="' + (r.success ? 'text-green-600' : 'text-red-600') + '">' + (r.success ? '✓' : '✗') + ' ' + r.domainName + (r.error ? ' - ' + r.error : '') + '</div>'
+              ).join('');
+              logArea.innerHTML = rows + '<div class="' + (data.success ? 'text-green-700' : 'text-red-600') + ' font-sans font-medium pt-1">' + (data.success ? data.message : (data.error || '同步失败')) + '</div>';
+              if (data.success) {
+                btn.textContent = '上传完成';
+                setTimeout(closeDcdnSyncModal, 1500);
+                htmx.trigger('#domains-table', 'sse:domain_updated');
+              } else {
+                btn.disabled = false;
+                btn.textContent = '重试上传';
+              }
+            } catch (e) {
+              logArea.innerHTML = '<div class="text-red-600 font-sans">上传失败: ' + e.message + '</div>';
+              btn.disabled = false;
+              btn.textContent = '重试上传';
+            }
+          }
+
+          function closeDcdnSyncModal() {
+            document.getElementById('dcdn-sync-modal').classList.add('hidden');
+            dcdnSyncDomainId = null;
+          }
         `}</script>
+
+        {/* DCDN Cert Sync Modal */}
+        <div id="dcdn-sync-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
+            <div class="px-6 py-4 border-b flex justify-between items-center">
+              <h3 id="dcdn-sync-title" class="text-lg font-semibold">同步证书到 DCDN</h3>
+              <button onclick="closeDcdnSyncModal()" class="text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+            <div id="dcdn-sync-content" class="p-6 overflow-y-auto flex-1"></div>
+            <div class="px-6 py-4 border-t flex justify-end gap-2">
+              <Button variant="secondary" onclick="closeDcdnSyncModal()">取消</Button>
+              <Button id="dcdn-sync-upload-btn" onclick="uploadSelectedDcdn()" disabled>上传选中</Button>
+            </div>
+          </div>
+        </div>
 
         {/* Certificate Update Modal */}
         <div id="cert-update-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -292,9 +415,10 @@ export function DomainsTable({ domains }: { domains: Domain[] }) {
 }
 
 function DomainRow({ domain }: { domain: Domain }) {
-  const daysRemaining = domain.cert_expiry 
+  const daysRemaining = domain.cert_expiry
     ? Math.ceil((new Date(domain.cert_expiry).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
     : null;
+  const allNames = [domain.domain, ...(domain.alt_domains || [])];
 
   return (
     <tr class="hover:bg-gray-50" id={`domain-${domain.id}`}>
@@ -305,6 +429,14 @@ function DomainRow({ domain }: { domain: Domain }) {
         <a href={`/domains/${domain.id}`} class="font-medium text-indigo-600 hover:text-indigo-700">
           {domain.domain}
         </a>
+        {(domain.alt_domains || []).length > 0 && (
+          <span
+            class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-700"
+            title={allNames.join('\n')}
+          >
+            +{domain.alt_domains.length} SAN
+          </span>
+        )}
       </td>
       <td class="py-3">
         <StatusBadge status={domain.cert_status || 'unknown'} />
@@ -343,8 +475,7 @@ function DomainRow({ domain }: { domain: Domain }) {
             更新
           </button>
           <button
-            hx-post={`/api/domains/${domain.id}/sync-dcdn`}
-            hx-swap="none"
+            onclick={`openDcdnSyncModal(${domain.id}, '${domain.domain}')`}
             class="text-blue-600 hover:text-blue-700 text-sm"
           >
             同步

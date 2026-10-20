@@ -5,7 +5,21 @@ import { certUpdater } from '../../services/cert-updater';
 import { dcdnSyncer } from '../../services/dcdn-syncer';
 import { auditLogger } from '../../services/audit-logger';
 import { sseController } from '../../controllers/sse-controller';
+import { parseDomainList } from '../../utils/validators';
 import type { Domain } from '../../types';
+
+/**
+ * Parse the alt_domains form field (newline/comma separated) into a validated list
+ */
+function parseAltDomains(input: unknown): string[] | undefined {
+  if (input === undefined) return undefined;
+  const raw = Array.isArray(input) ? input.join(',') : String(input || '');
+  const { valid, domains, error } = parseDomainList(raw);
+  if (!valid) {
+    throw new Error(error || '附加域名格式错误');
+  }
+  return domains;
+}
 
 function renderDomainsTable(domains: Domain[]): string {
   if (domains.length === 0) {
@@ -32,9 +46,13 @@ function renderDomainsTable(domains: Domain[]): string {
     const status = d.cert_status || 'unknown';
     const days = d.cert_expiry ? Math.ceil((new Date(d.cert_expiry).getTime() - Date.now()) / 86400000) : null;
     const daysColor = days !== null ? (days <= 7 ? 'text-red-600' : days <= 30 ? 'text-yellow-600' : 'text-green-600') : '';
+    const allNames = [d.domain, ...(d.alt_domains || [])];
+    const sanBadge = (d.alt_domains || []).length > 0
+      ? `<span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-700" title="${allNames.map(n => n.replace(/"/g, '&quot;')).join('\n')}">+${d.alt_domains.length} SAN</span>`
+      : '';
     return `<tr class="hover:bg-gray-50" id="domain-${d.id}">
       <td class="py-3 pr-4"><input type="checkbox" name="domain_ids" value="${d.id}" class="rounded" /></td>
-      <td class="py-3"><a href="/domains/${d.id}" class="font-medium text-indigo-600 hover:text-indigo-700">${d.domain}</a></td>
+      <td class="py-3"><a href="/domains/${d.id}" class="font-medium text-indigo-600 hover:text-indigo-700">${d.domain}</a>${sanBadge}</td>
       <td class="py-3"><span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${statusStyles[status]}">${statusLabels[status]}</span></td>
       <td class="py-3 text-sm text-gray-500">${d.cert_expiry ? new Date(d.cert_expiry).toLocaleDateString('zh-CN') : '-'}</td>
       <td class="py-3">${days !== null ? `<span class="text-sm font-medium ${daysColor}">${days} 天</span>` : '-'}</td>
@@ -43,6 +61,7 @@ function renderDomainsTable(domains: Domain[]): string {
       <td class="py-3 text-right"><div class="flex justify-end gap-2">
         <button hx-post="/api/domains/${d.id}/check" hx-swap="none" class="text-indigo-600 text-sm">检测</button>
         <button hx-post="/api/domains/${d.id}/update-cert" hx-swap="none" class="text-green-600 text-sm">更新</button>
+        <button onclick="openDcdnSyncModal(${d.id}, '${d.domain}')" class="text-blue-600 text-sm">同步</button>
         <button hx-delete="/api/domains/${d.id}" hx-target="#domain-${d.id}" hx-swap="outerHTML" hx-confirm="确定删除?" class="text-red-600 text-sm">删除</button>
       </div></td>
     </tr>`;
@@ -62,23 +81,29 @@ export const domainsApi = new Elysia({ prefix: '/api/domains' })
     try {
       const domain = domainService.create({
         domain: body.domain,
+        alt_domains: parseAltDomains(body.alt_domains),
         notes: body.notes || undefined,
         auto_renew: body.auto_renew === 'on' || body.auto_renew === true,
         dcdn_enabled: body.dcdn_enabled === 'on' || body.dcdn_enabled === true
       });
-      auditLogger.log({ action: 'domain_create', targetType: 'domain', targetId: domain.id, details: { domain: domain.domain }, status: 'success' });
+      auditLogger.log({ action: 'domain_create', targetType: 'domain', targetId: domain.id, details: { domain: domain.domain, altDomains: domain.alt_domains }, status: 'success' });
       sseController.broadcast({ type: 'domain_updated', data: { id: domain.id } });
       return new Response(renderDomainsTable(domainService.list()), { headers: { 'Content-Type': 'text/html' } });
     } catch (error) {
       set.status = 400;
       return { error: error instanceof Error ? error.message : 'Failed' };
     }
-  }, { body: t.Object({ domain: t.String(), notes: t.Optional(t.String()), auto_renew: t.Optional(t.Union([t.String(), t.Boolean()])), dcdn_enabled: t.Optional(t.Union([t.String(), t.Boolean()])) }) })
+  }, { body: t.Object({ domain: t.String(), alt_domains: t.Optional(t.String()), notes: t.Optional(t.String()), auto_renew: t.Optional(t.Union([t.String(), t.Boolean()])), dcdn_enabled: t.Optional(t.Union([t.String(), t.Boolean()])) }) })
 
   .put('/:id', async ({ params, body, set }) => {
     try {
       const id = parseInt(params.id);
-      domainService.update(id, { notes: body.notes, auto_renew: body.auto_renew === 'on' || body.auto_renew === true, dcdn_enabled: body.dcdn_enabled === 'on' || body.dcdn_enabled === true });
+      domainService.update(id, {
+        alt_domains: parseAltDomains(body.alt_domains),
+        notes: body.notes,
+        auto_renew: body.auto_renew === 'on' || body.auto_renew === true,
+        dcdn_enabled: body.dcdn_enabled === 'on' || body.dcdn_enabled === true
+      });
       auditLogger.log({ action: 'domain_update', targetType: 'domain', targetId: id, details: body as Record<string, unknown>, status: 'success' });
       sseController.broadcast({ type: 'domain_updated', data: { id } });
       return { success: true };
@@ -86,7 +111,7 @@ export const domainsApi = new Elysia({ prefix: '/api/domains' })
       set.status = 400;
       return { error: error instanceof Error ? error.message : 'Failed' };
     }
-  }, { params: t.Object({ id: t.String() }), body: t.Object({ notes: t.Optional(t.String()), auto_renew: t.Optional(t.Union([t.String(), t.Boolean()])), dcdn_enabled: t.Optional(t.Union([t.String(), t.Boolean()])) }) })
+  }, { params: t.Object({ id: t.String() }), body: t.Object({ alt_domains: t.Optional(t.String()), notes: t.Optional(t.String()), auto_renew: t.Optional(t.Union([t.String(), t.Boolean()])), dcdn_enabled: t.Optional(t.Union([t.String(), t.Boolean()])) }) })
 
   .delete('/:id', async ({ params, set }) => {
     try {
@@ -203,19 +228,61 @@ export const domainsApi = new Elysia({ prefix: '/api/domains' })
     });
   }, { params: t.Object({ id: t.String() }) })
 
-  .post('/:id/sync-dcdn', async ({ params, set }) => {
+  // 查询与该条目证书相关的 DCDN 域名 (用于一键同步选择)
+  .get('/:id/dcdn-matches', async ({ params, set }) => {
     try {
       const id = parseInt(params.id);
       const domain = domainService.get(id);
       if (!domain) { set.status = 404; return { error: 'Not found' }; }
-      // Enqueue sync task - actual sync requires certificate data
-      const taskId = dcdnSyncer.enqueueSync(id);
-      return { success: true, taskId };
+
+      const matched = await dcdnSyncer.getMatchingDCDNDomains(id);
+      const stored = await dcdnSyncer.getStoredCertificate(id);
+
+      return {
+        success: true,
+        certNames: [domain.domain, ...(domain.alt_domains || [])],
+        hasStoredCert: !!stored,
+        storedExpiresOn: stored?.expiresOn || null,
+        domains: matched
+      };
+    } catch (error) {
+      set.status = 500;
+      return { error: error instanceof Error ? error.message : 'Failed to fetch matching DCDN domains' };
+    }
+  }, { params: t.Object({ id: t.String() }) })
+
+  // 同步已签发的证书到相关联的 DCDN 域名
+  // body.domains 为空时同步到所有匹配的 DCDN 域名
+  .post('/:id/sync-dcdn', async ({ params, body, set }) => {
+    try {
+      const id = parseInt(params.id);
+      const domain = domainService.get(id);
+      if (!domain) { set.status = 404; return { error: 'Not found' }; }
+
+      const selectedDomains = Array.isArray(body?.domains) ? body.domains : undefined;
+      const result = await dcdnSyncer.syncStoredCertificate(id, { domains: selectedDomains });
+
+      auditLogger.log({
+        action: 'dcdn_sync_manual',
+        targetType: 'domain',
+        targetId: id,
+        details: { domain: domain.domain, domains: selectedDomains || 'auto', message: result.message },
+        status: result.success ? 'success' : 'failure'
+      });
+
+      if (!result.success) {
+        set.status = 400;
+        return { error: result.message, results: result.results };
+      }
+      return { success: true, message: result.message, results: result.results };
     } catch (error) {
       set.status = 500;
       return { error: error instanceof Error ? error.message : 'Failed' };
     }
-  }, { params: t.Object({ id: t.String() }) })
+  }, {
+    params: t.Object({ id: t.String() }),
+    body: t.Optional(t.Object({ domains: t.Optional(t.Union([t.Array(t.String()), t.String()])) }))
+  })
 
   .get('/dcdn-list', async ({ set }) => {
     try {

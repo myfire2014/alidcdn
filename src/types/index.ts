@@ -2,6 +2,8 @@
 export interface Domain {
   id: number;
   domain: string;
+  /** 附加域名 (SAN),与主域名签发在同一张证书,支持泛域名如 *.foo.com */
+  alt_domains: string[];
   notes: string | null;
   auto_renew: boolean;
   dcdn_enabled: boolean;
@@ -56,12 +58,14 @@ export interface SchedulerConfig {
 // Domain Service Types
 export interface CreateDomainInput {
   domain: string;
+  alt_domains?: string[];
   notes?: string;
   auto_renew?: boolean;
   dcdn_enabled?: boolean;
 }
 
 export interface UpdateDomainInput {
+  alt_domains?: string[];
   notes?: string;
   auto_renew?: boolean;
   dcdn_enabled?: boolean;
@@ -88,6 +92,7 @@ export interface CertInfo {
   validFrom: Date;
   validTo: Date;
   daysRemaining: number;
+  subjectAltNames?: string[];
 }
 
 export interface CertStatusInput {

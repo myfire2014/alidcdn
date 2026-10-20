@@ -1,9 +1,10 @@
-import { domainService } from './domain-service';
+import { domainService, getCertNames } from './domain-service';
 import { taskQueue } from './task-queue';
 import { sseController } from '../controllers/sse-controller';
 import { logCertCheck } from './audit-logger';
 import { getCertInfo } from '../utils/cert-checker';
 import { getCertStatusFromInfo, DEFAULT_EXPIRY_THRESHOLD } from '../utils/cert-status';
+import { certCoversName } from '../utils/validators';
 import type { CertCheckResult, Domain, TaskStatus } from '../types';
 
 export class CertMonitor {
@@ -83,6 +84,24 @@ export class CertMonitor {
     try {
       const certInfo = await getCertInfo(domainData.domain);
       const status = getCertStatusFromInfo(certInfo, this.expiryThreshold);
+
+      // Verify the presented certificate covers every managed name
+      // (wildcard/multi-domain certificates must include all of them)
+      const names = getCertNames(domainData);
+      const uncovered = names.filter(name => !(certInfo.subjectAltNames || []).some(san => certCoversName([san], name)));
+
+      if (uncovered.length > 0 && status !== 'error') {
+        return {
+          domainId: domainData.id,
+          domain: domainData.domain,
+          status: 'error',
+          issuer: certInfo.issuer,
+          validFrom: certInfo.validFrom,
+          validTo: certInfo.validTo,
+          daysRemaining: certInfo.daysRemaining,
+          error: `证书未覆盖域名: ${uncovered.join(', ')} (证书 SAN: ${(certInfo.subjectAltNames || []).join(', ') || '无'})`
+        };
+      }
 
       return {
         domainId: domainData.id,

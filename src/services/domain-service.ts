@@ -1,11 +1,32 @@
 import { getDatabase } from '../db';
-import { validateDomain, normalizeDomain } from '../utils/validators';
+import { validateDomain, normalizeDomain, parseDomainList, MAX_CERT_NAMES } from '../utils/validators';
 import type { Domain, CreateDomainInput, UpdateDomainInput } from '../types';
 
 export interface CertStatusUpdate {
   status: 'valid' | 'expiring_soon' | 'expired' | 'unknown' | 'error';
   expiry?: string;
   issuer?: string;
+}
+
+/**
+ * Normalize and validate a SAN list, dedupe, and remove entries equal to the primary domain
+ */
+function normalizeAltDomains(primary: string, altDomains?: string[]): string[] {
+  if (!altDomains || altDomains.length === 0) return [];
+
+  const { valid, domains, error } = parseDomainList(altDomains.join(','));
+  if (!valid) {
+    throw new Error(error || 'Invalid alt domains');
+  }
+
+  return domains.filter(d => d !== primary);
+}
+
+/**
+ * Get all certificate names for a domain entry (primary + alt domains)
+ */
+export function getCertNames(domain: Domain): string[] {
+  return [domain.domain, ...(domain.alt_domains || [])];
 }
 
 export class DomainService {
@@ -19,15 +40,22 @@ export class DomainService {
     }
 
     const normalizedDomain = normalizeDomain(data.domain);
+    const altDomains = normalizeAltDomains(normalizedDomain, data.alt_domains);
+
+    if (altDomains.length + 1 > MAX_CERT_NAMES) {
+      throw new Error(`域名数量超过上限 (${MAX_CERT_NAMES})`);
+    }
+
     const db = getDatabase();
     const now = new Date().toISOString();
 
     try {
       const result = db.run(`
-        INSERT INTO domains (domain, notes, auto_renew, dcdn_enabled, cert_status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'unknown', ?, ?)
+        INSERT INTO domains (domain, alt_domains, notes, auto_renew, dcdn_enabled, cert_status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'unknown', ?, ?)
       `, [
         normalizedDomain,
+        altDomains.length > 0 ? JSON.stringify(altDomains) : null,
         data.notes || null,
         data.auto_renew !== false ? 1 : 0,
         data.dcdn_enabled ? 1 : 0,
@@ -97,6 +125,14 @@ export class DomainService {
     const updates: string[] = [];
     const values: (string | number | null)[] = [];
 
+    if (data.alt_domains !== undefined) {
+      const altDomains = normalizeAltDomains(existing.domain, data.alt_domains);
+      if (altDomains.length + 1 > MAX_CERT_NAMES) {
+        throw new Error(`域名数量超过上限 (${MAX_CERT_NAMES})`);
+      }
+      updates.push('alt_domains = ?');
+      values.push(altDomains.length > 0 ? JSON.stringify(altDomains) : null);
+    }
     if (data.notes !== undefined) {
       updates.push('notes = ?');
       values.push(data.notes || null);
@@ -186,8 +222,21 @@ export class DomainService {
   }
 
   private mapRow(row: Domain): Domain {
+    let altDomains: string[] = [];
+    if (row.alt_domains) {
+      try {
+        const parsed = JSON.parse(String(row.alt_domains));
+        if (Array.isArray(parsed)) {
+          altDomains = parsed.map(String);
+        }
+      } catch {
+        altDomains = [];
+      }
+    }
+
     return {
       ...row,
+      alt_domains: altDomains,
       auto_renew: Boolean(row.auto_renew),
       dcdn_enabled: Boolean(row.dcdn_enabled)
     };

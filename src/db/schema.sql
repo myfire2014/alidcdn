@@ -2,6 +2,7 @@
 CREATE TABLE IF NOT EXISTS domains (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   domain TEXT NOT NULL UNIQUE,
+  alt_domains TEXT,
   notes TEXT,
   auto_renew INTEGER DEFAULT 1,
   dcdn_enabled INTEGER DEFAULT 0,

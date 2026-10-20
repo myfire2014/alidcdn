@@ -93,7 +93,7 @@ class SSEController {
       try {
         // Add to event queue
         conn.eventQueue.push({
-          type: 'type' in event ? event.type : event.type,
+          type: event.type,
           data: 'payload' in event ? event.payload : event.data
         });
         // Also call callback if set

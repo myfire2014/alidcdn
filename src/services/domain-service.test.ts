@@ -122,4 +122,55 @@ describe('DomainService', () => {
     expect(result).not.toBeNull();
     expect(result!.domain).toBe('byname.com');
   });
+
+  test('should create domain with wildcard primary', () => {
+    const result = service.create({ domain: '*.wildcard.com' });
+
+    expect(result.domain).toBe('*.wildcard.com');
+    expect(result.alt_domains).toEqual([]);
+  });
+
+  test('should create domain with alt domains (多域名证书)', () => {
+    const result = service.create({
+      domain: '*.239g.com',
+      alt_domains: ['*.fmhyw.com', '239g.com', 'fmhyw.com']
+    });
+
+    expect(result.domain).toBe('*.239g.com');
+    expect(result.alt_domains).toEqual(['*.fmhyw.com', '239g.com', 'fmhyw.com']);
+  });
+
+  test('should normalize and dedupe alt domains, excluding primary', () => {
+    const result = service.create({
+      domain: 'main.com',
+      alt_domains: ['*.Sub.COM', 'sub.com', 'main.com', 'other.com']
+    });
+
+    expect(result.alt_domains).toEqual(['*.sub.com', 'sub.com', 'other.com']);
+  });
+
+  test('should reject invalid alt domains', () => {
+    expect(() => service.create({
+      domain: 'main.com',
+      alt_domains: ['bad domain']
+    })).toThrow();
+  });
+
+  test('should update alt domains', () => {
+    const created = service.create({ domain: 'updatemulti.com', alt_domains: ['a.com'] });
+    const updated = service.update(created.id, { alt_domains: ['b.com', '*.c.com'] });
+
+    expect(updated.alt_domains).toEqual(['b.com', '*.c.com']);
+
+    const cleared = service.update(created.id, { alt_domains: [] });
+    expect(cleared.alt_domains).toEqual([]);
+  });
+
+  test('should keep alt domains when updating other fields', () => {
+    const created = service.create({ domain: 'keepmulti.com', alt_domains: ['x.com'] });
+    const updated = service.update(created.id, { notes: 'hello' });
+
+    expect(updated.alt_domains).toEqual(['x.com']);
+    expect(updated.notes).toBe('hello');
+  });
 });

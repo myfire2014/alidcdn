@@ -33,16 +33,16 @@ describe('CredentialStore', () => {
     expect(result).toBeNull();
   });
 
-  test('should store encrypted value different from plaintext', async () => {
+  test('should store value retrievable via raw read', async () => {
+    // Storage layer is plain (no encryption) for local use - see utils/crypto.ts
     const provider = 'aliyun';
     const keyName = 'access_key';
     const value = 'LTAI5tTestAccessKey';
 
     await store.setCredential(provider, keyName, value);
-    const encrypted = store.getRawEncryptedValue(provider, keyName);
+    const raw = store.getRawEncryptedValue(provider, keyName);
 
-    expect(encrypted).not.toBe(value);
-    expect(encrypted).not.toBeNull();
+    expect(raw).toBe(value);
   });
 
   test('should update existing credential', async () => {

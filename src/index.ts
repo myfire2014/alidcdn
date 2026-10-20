@@ -29,9 +29,8 @@ taskQueue.setExecutor(async (task) => {
       await certUpdater.executeUpdateTask(task);
       break;
     case 'sync':
-      // DCDN sync requires certificate data, which should be passed separately
-      // For now, just mark as needing certificate
-      taskQueue.completeTask(task.id, false, 'Certificate data required for sync');
+      // 使用已签发并保存的证书同步到所有相关联的 DCDN 域名
+      await dcdnSyncer.executeSyncTask(task);
       break;
     default:
       taskQueue.completeTask(task.id, false, `Unknown task type: ${task.type}`);
@@ -73,7 +72,7 @@ const app = new Elysia()
   .use(eventsRoute)
   // Page routes
   .use(pagesRoute)
-  .listen(3000);
+  .listen(Number(process.env.PORT || 3000));
 
 // Start scheduler
 scheduler.start();

@@ -58,6 +58,14 @@ export function DomainDetailPage({ domain, logs }: DomainDetailProps) {
                 <dt class="text-gray-500">状态</dt>
                 <dd><StatusBadge status={domain.cert_status || 'unknown'} /></dd>
               </div>
+              <div class="flex flex-col gap-1">
+                <dt class="text-gray-500">覆盖域名 ({[domain.domain, ...(domain.alt_domains || [])].length})</dt>
+                <dd class="flex flex-wrap gap-1">
+                  {[domain.domain, ...(domain.alt_domains || [])].map(name => (
+                    <span class="inline-flex items-center px-2 py-0.5 rounded bg-gray-100 text-gray-700 text-xs font-mono">{name}</span>
+                  ))}
+                </dd>
+              </div>
               <div class="flex justify-between">
                 <dt class="text-gray-500">过期时间</dt>
                 <dd class="font-medium">
@@ -100,12 +108,23 @@ export function DomainDetailPage({ domain, logs }: DomainDetailProps) {
               <div class="flex items-center justify-between">
                 <div>
                   <p class="font-medium">DCDN 同步</p>
-                  <p class="text-sm text-gray-500">同步证书到阿里云 DCDN</p>
+                  <p class="text-sm text-gray-500">签发后自动同步到相关联的 DCDN 域名</p>
                 </div>
                 <label class="relative inline-flex items-center cursor-pointer">
                   <input type="checkbox" name="dcdn_enabled" checked={domain.dcdn_enabled} class="sr-only peer" />
                   <div class="w-11 h-6 bg-gray-200 peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
                 </label>
+              </div>
+
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">附加域名 (SAN)</label>
+                <textarea
+                  name="alt_domains"
+                  rows="4"
+                  placeholder={'*.example.com\nfoo.com'}
+                  class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
+                >{(domain.alt_domains || []).join('\n')}</textarea>
+                <p class="mt-1 text-sm text-gray-500">每行一个,支持泛域名,与主域名签发在同一张证书</p>
               </div>
 
               <div>
@@ -126,15 +145,39 @@ export function DomainDetailPage({ domain, logs }: DomainDetailProps) {
               <Button
                 variant="secondary"
                 class="w-full"
-                hx-post={`/api/domains/${domain.id}/sync-dcdn`}
-                hx-swap="none"
-                disabled={!domain.dcdn_enabled}
+                onclick={`syncAllDcdn(${domain.id}, this)`}
               >
-                同步到 DCDN
+                一键同步到所有相关 DCDN 域名
               </Button>
+              <p id={`dcdn-sync-status-${domain.id}`} class="mt-2 text-sm text-gray-500"></p>
             </div>
           </Card>
         </div>
+
+        <script>{`
+          async function syncAllDcdn(domainId, btn) {
+            const status = document.getElementById('dcdn-sync-status-' + domainId);
+            btn.disabled = true;
+            btn.textContent = '正在同步...';
+            status.textContent = '正在上传证书到相关联的 DCDN 域名...';
+            try {
+              const res = await fetch('/api/domains/' + domainId + '/sync-dcdn', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}'
+              });
+              const data = await res.json();
+              status.textContent = data.success ? '✓ ' + data.message : '✗ ' + (data.error || '同步失败');
+              status.className = 'mt-2 text-sm ' + (data.success ? 'text-green-600' : 'text-red-600');
+            } catch (e) {
+              status.textContent = '✗ 同步失败: ' + e.message;
+              status.className = 'mt-2 text-sm text-red-600';
+            } finally {
+              btn.disabled = false;
+              btn.textContent = '一键同步到所有相关 DCDN 域名';
+            }
+          }
+        `}</script>
 
         {/* Activity Log */}
         <Card title="操作历史">
